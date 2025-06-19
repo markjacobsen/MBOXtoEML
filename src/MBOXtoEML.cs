@@ -52,99 +52,155 @@ class MBOXtoEML
         // --- MBOX Processing Logic ---
         await ConvertMboxToEml(mboxFilePath, outputDirectory);
 
-        Console.WriteLine("\nConversion complete. Press any key to exit.");
-        Console.ReadKey();
+        Console.WriteLine("\nConversion complete.");
+    }
+
+    /// <summary>
+    /// A helper class to hold the raw lines of an email segment, its extracted metadata,
+    /// and a flag to track if it was successfully extracted as an EML.
+    /// </summary>
+    private class EmailSegment
+    {
+        public List<string> RawLines { get; set; } = new List<string>();
+        public string Subject { get; set; } = "No Subject";
+        public string SentDate { get; set; } = "No Date";
+        public bool SuccessfullyExtracted { get; set; } = false;
+        public string FromDelimiterLine { get; set; } // Stores the original "From " delimiter line
     }
 
     /// <summary>
     /// Reads an MBOX file line by line, identifies individual email messages,
-    /// and saves each message as a separate EML file.
-    /// It also attempts to extract the Subject and Date headers for naming the EML files.
+    /// extracts their subject and date, saves each message as a separate EML file,
+    /// and finally rewrites the MBOX file to remove the successfully extracted emails.
     /// </summary>
     /// <param name="mboxFilePath">The full path to the MBOX file.</param>
     /// <param name="outputDirectory">The directory where EML files will be saved.</param>
     private static async Task ConvertMboxToEml(string mboxFilePath, string outputDirectory)
     {
-        int emailCount = 0;
-        StringWriter currentEmailContent = null; // Buffer to hold content of the current email
-        string currentSubject = "No Subject";   // Stores the subject of the current email
-        string currentSentDate = "No Date";     // Stores the sent date of the current email
+        List<EmailSegment> emailsInMbox = new List<EmailSegment>();
+        EmailSegment currentSegment = null;
+        int totalEmailsIdentified = 0;
 
+        // --- Phase 1: Read MBOX and Segment Emails into memory ---
         try
         {
-            // Read the MBOX file using a StreamReader
+            Console.WriteLine("Phase 1/3: Reading MBOX file and segmenting emails...");
             using (StreamReader reader = new StreamReader(mboxFilePath))
             {
                 string line;
-                bool inEmail = false; // Flag to indicate if we are currently inside an email message
-
                 while ((line = await reader.ReadLineAsync()) != null)
                 {
                     // MBOX files use "From " as a delimiter for new messages.
-                    // This line indicates the start of a *new* email.
                     // We check for lines starting with "From " but not ">From " (which would be escaped in content).
                     if (line.StartsWith("From ") && !line.StartsWith(">From "))
                     {
-                        // If we were already in an email, it means the previous email has ended.
-                        if (inEmail && currentEmailContent != null)
+                        // If a previous segment was being processed, add it to the list
+                        if (currentSegment != null)
                         {
-                            // Save the completed email content to an EML file, using extracted subject and date
-                            await SaveEmlFile(outputDirectory, emailCount, currentEmailContent.ToString(), currentSubject, currentSentDate);
+                            emailsInMbox.Add(currentSegment);
                         }
-
-                        // Start a new email
-                        emailCount++;
-                        currentEmailContent = new StringWriter();
-                        inEmail = true;
-                        currentSubject = "No Subject";   // Reset subject for the new email
-                        currentSentDate = "No Date";     // Reset date for the new email
-
-                        // The "From " delimiter line itself is typically NOT part of the EML content.
-                        // It simply marks the beginning of a new message.
-                        continue; // Skip adding this delimiter line to the current email content
+                        totalEmailsIdentified++;
+                        currentSegment = new EmailSegment();
+                        currentSegment.FromDelimiterLine = line; // Store the original "From " delimiter line
                     }
-
-                    // If we are currently processing an email, add the line to its content.
-                    if (inEmail && currentEmailContent != null)
+                    else if (currentSegment != null)
                     {
-                        await currentEmailContent.WriteLineAsync(line);
+                        // Add line to current email segment's raw lines
+                        currentSegment.RawLines.Add(line);
 
-                        // Attempt to extract Subject and Date from headers.
+                        // Attempt to extract Subject and Date from headers if not already found
                         // This simple approach only captures the first occurrence and doesn't handle multi-line headers.
-                        if (currentSubject == "No Subject" && line.StartsWith("Subject:", StringComparison.OrdinalIgnoreCase))
+                        if (currentSegment.Subject == "No Subject" && line.StartsWith("Subject:", StringComparison.OrdinalIgnoreCase))
                         {
-                            currentSubject = SanitizeFilename(line.Substring("Subject:".Length).Trim());
+                            currentSegment.Subject = SanitizeFilename(line.Substring("Subject:".Length).Trim());
                         }
-                        else if (currentSentDate == "No Date" && line.StartsWith("Date:", StringComparison.OrdinalIgnoreCase))
+                        else if (currentSegment.SentDate == "No Date" && line.StartsWith("Date:", StringComparison.OrdinalIgnoreCase))
                         {
                             string dateStr = line.Substring("Date:".Length).Trim();
                             // Try to parse the date to a sortable format (YYYY-MM-DD_HHMMSS)
                             if (DateTimeOffset.TryParse(dateStr, out DateTimeOffset parsedDate))
                             {
-                                currentSentDate = parsedDate.ToString("yyyy-MM-dd_HHmmss");
+                                currentSegment.SentDate = parsedDate.ToString("yyyy-MM-dd_HHmmss");
                             }
                             else
                             {
                                 // If parsing fails, use a sanitized version of the raw date string
-                                currentSentDate = SanitizeFilename(dateStr);
+                                currentSegment.SentDate = SanitizeFilename(dateStr);
                             }
                         }
                     }
-                    // If not in an email and not a "From " line, it's likely leading garbage or a malformed file.
-                    // We just skip these lines until the first "From " is found.
                 }
-
-                // After the loop, save the very last email if one was being processed.
-                if (inEmail && currentEmailContent != null)
+                // Add the very last segment if it exists after the loop
+                if (currentSegment != null)
                 {
-                    await SaveEmlFile(outputDirectory, emailCount, currentEmailContent.ToString(), currentSubject, currentSentDate);
+                    emailsInMbox.Add(currentSegment);
                 }
             }
-            Console.WriteLine($"Successfully extracted {emailCount} emails.");
+            Console.WriteLine($"Identified {totalEmailsIdentified} email segments in the MBOX file.");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"An error occurred during MBOX processing: {ex.Message}");
+            Console.WriteLine($"An error occurred during MBOX segmentation: {ex.Message}");
+            Console.WriteLine(ex.StackTrace);
+            return; // Cannot proceed without proper segmentation
+        }
+
+        // --- Phase 2: Save EML files and mark successful extractions ---
+        Console.WriteLine("Phase 2/3: Saving emails as EML files...");
+        int successfullyExtractedCount = 0;
+        for (int i = 0; i < emailsInMbox.Count; i++)
+        {
+            var email = emailsInMbox[i];
+            // Reconstruct the email content from its raw lines for saving as EML
+            using (StringWriter emailContentWriter = new StringWriter())
+            {
+                foreach (var line in email.RawLines)
+                {
+                    await emailContentWriter.WriteLineAsync(line);
+                }
+                // SaveEmlFile returns true on success, false on failure
+                email.SuccessfullyExtracted = await SaveEmlFile(outputDirectory, i + 1, emailContentWriter.ToString(), email.Subject, email.SentDate);
+                if (email.SuccessfullyExtracted)
+                {
+                    successfullyExtractedCount++;
+                }
+            }
+        }
+        Console.WriteLine($"Successfully extracted {successfullyExtractedCount} emails to EML files.");
+
+
+        // --- Phase 3: Rewrite MBOX file to remove extracted emails ---
+        try
+        {
+            Console.WriteLine("Phase 3/3: Rewriting MBOX file to remove successfully extracted emails...");
+            int keptEmailsCount = 0;
+            // Open the MBOX file for writing, overwriting its content (false means truncate/overwrite)
+            using (StreamWriter writer = new StreamWriter(mboxFilePath, false))
+            {
+                foreach (var email in emailsInMbox)
+                {
+                    // If the email was NOT successfully extracted, write it back to the MBOX
+                    if (!email.SuccessfullyExtracted)
+                    {
+                        // Re-add the "From " delimiter line that was stripped during initial parsing
+                        if (!string.IsNullOrEmpty(email.FromDelimiterLine))
+                        {
+                            await writer.WriteLineAsync(email.FromDelimiterLine);
+                        }
+                        foreach (var line in email.RawLines)
+                        {
+                            await writer.WriteLineAsync(line);
+                        }
+                        keptEmailsCount++;
+                    }
+                }
+            }
+            Console.WriteLine($"MBOX file rewritten. {keptEmailsCount} emails remain (those that failed to extract).");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error rewriting MBOX file: {ex.Message}");
+            Console.WriteLine("The original MBOX file might be partially modified or corrupted. Please check it manually.");
             Console.WriteLine(ex.StackTrace);
         }
     }
@@ -158,7 +214,8 @@ class MBOXtoEML
     /// <param name="emailContent">The full content of the email.</param>
     /// <param name="subject">The subject of the email, used for filename.</param>
     /// <param name="sentDate">The sent date of the email, formatted for filename.</param>
-    private static async Task SaveEmlFile(string outputDirectory, int emailIndex, string emailContent, string subject, string sentDate)
+    /// <returns>True if the EML file was saved successfully, false otherwise.</returns>
+    private static async Task<bool> SaveEmlFile(string outputDirectory, int emailIndex, string emailContent, string subject, string sentDate)
     {
         // Ensure subject and sentDate are not empty or too long for filenames
         string safeSubject = string.IsNullOrWhiteSpace(subject) || subject == "No Subject" ? "NoSubject" : subject;
@@ -180,10 +237,12 @@ class MBOXtoEML
         {
             await File.WriteAllTextAsync(filePath, emailContent.Trim()); // Trim to remove any trailing newlines
             Console.WriteLine($"Saved: {fileName}");
+            return true; // Indicate success
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error saving {fileName}: {ex.Message}");
+            return false; // Indicate failure
         }
     }
 

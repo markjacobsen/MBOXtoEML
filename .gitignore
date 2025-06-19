@@ -4,6 +4,7 @@
 ## Get latest from `dotnet new gitignore`
 
 notes.txt
+temp.txt
 
 # dotenv files
 .env
