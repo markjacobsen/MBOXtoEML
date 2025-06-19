@@ -79,11 +79,13 @@ class MBOXtoEML
                 {
                     // MBOX files use "From " as a delimiter for new messages.
                     // This line indicates the start of a *new* email.
-                    // We use a regex to be more robust, as the "From " line might contain other info.
-                    if (line.StartsWith("From ") && line.Length > 5 && char.IsWhiteSpace(line[4]) && !Regex.IsMatch(line, @"^\s*From\s")) // A more robust check to avoid false positives with "From " in body
+                    // A standard MBOX delimiter line looks like: "From sender@example.com Tue Jan 01 00:00:00 2020"
+                    // We need to be careful not to mistake "From " appearing in the email body as a delimiter.
+                    // Such occurrences are typically prefixed with a ">" (e.g., ">From some_user@example.com").
+                    if (line.StartsWith("From ") && !line.StartsWith(">From "))
                     {
                         // If we were already in an email, it means the previous email has ended.
-                        if (inEmail)
+                        if (inEmail && currentEmailContent != null)
                         {
                             // Save the completed email content to an EML file
                             await SaveEmlFile(outputDirectory, emailCount, currentEmailContent.ToString());
@@ -94,13 +96,12 @@ class MBOXtoEML
                         currentEmailContent = new StringWriter();
                         inEmail = true;
 
-                        // The "From " line itself is a delimiter and typically not part of the EML content.
-                        // However, some parsers might expect it or it could be a malformed MBOX.
-                        // For standard MBOX to EML, we generally skip this delimiter line.
-                        // If your MBOX requires it, uncomment the line below.
+                        // The "From " delimiter line itself is typically NOT part of the EML content.
+                        // If your specific MBOX file or a particular EML parser requires it,
+                        // you can uncomment the line below to include it.
                         // await currentEmailContent.WriteLineAsync(line);
                     }
-                    else if (inEmail)
+                    else if (inEmail && currentEmailContent != null)
                     {
                         // If we are currently in an email, append the line to its content.
                         await currentEmailContent.WriteLineAsync(line);
@@ -110,7 +111,7 @@ class MBOXtoEML
                 }
 
                 // After the loop, save the very last email if one was being processed.
-                if (inEmail)
+                if (inEmail && currentEmailContent != null)
                 {
                     await SaveEmlFile(outputDirectory, emailCount, currentEmailContent.ToString());
                 }
